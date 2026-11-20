@@ -137,11 +137,77 @@ If `MCP_API_KEY` is set, every `/mcp` request must send it in the `x-api-key` he
 | 2 | "Can I pay just a portion of my bill now and the rest later?" | 8.3 first, 5.1 *Full and partial payments* included |
 | 3 | "I think my bill is wrong, how do I file a complaint?" | §7 / FAQ 8.4, with the 15-day window in the text |
 
+## AI Agent (`agent`)
+
+The agent is a terminal chat assistant. **Claude** decides which tools to call, and the agent code runs them.
+
+- **LLM:** Claude Opus 5.5 (`claude-opus-5-5`) through the Messages API, with effort `medium` and adaptive thinking. The tool loop is written by hand in `src/agent.ts`: send the history, run every `tool_use` block, return all `tool_result`s in one message, and repeat until `end_turn`.
+  - The full assistant content is kept in the history unchanged.
+  - The `fallbacks: "default"` safety fallback is turned on.
+  - The tools and system prompt are prompt-cached across the turns of a session.
+- **MCP client:** the agent connects to the MCP server over Streamable HTTP and discovers its tools with `tools/list`. `search_billing_documentation` is therefore not hard-coded in the agent.
+- **REST tools:** these call the Billing API through the API Gateway (`GATEWAY_BASE_URL`), and send `Ocp-Apim-Subscription-Key` when it is set.
+  - `get_bill` calls Query Bill.
+  - `get_bill_details` calls Query Bill Detailed, with paging.
+  - `pay_bill` calls Pay Bill.
+
+| Question type | Tools used |
+|---|---|
+| Policy / pricing rules | MCP `search_billing_documentation` (answer cites §) |
+| Live bill, usage, payment | REST via gateway |
+| "Why is my bill $70?" | `get_bill_details` + `search_billing_documentation` |
+
+### Safety rules (enforced in code, not only in the prompt)
+
+- **No access to other people's data.** The REST tools act on the logged-in subscriber, whose number is read from the JWT.
+  - In a SUBSCRIBER session the tools have **no `subscriberNo` parameter**, so a number typed into the chat cannot redirect a call.
+  - If the model sends another number anyway, the agent refuses with 403 before making any HTTP call. The API would also return 403.
+- **Explicit payment confirmation (Billing Guide §5.2).**
+  - `pay_bill` first reads the stored bill.
+  - The CLI then shows the human the subscriber, period, bill total, remaining balance and amount, and waits for `yes`.
+  - The model cannot answer this prompt. Any other answer means nothing is sent, and the model is told `NOT_SUBMITTED`.
+- **Idempotent payments (§5.3).** Every confirmed payment gets one `transactionId`. A network retry reuses it, so the API answers 409 instead of charging twice.
+- **Errors reach the model as data.** API and validation errors come back as `is_error` tool results with the API error code, so the model can explain them instead of guessing.
+
+### Tool traces
+
+Every tool call is printed in the terminal and appended to `agent/traces/trace-<session>.jsonl`. Each entry records the turn, tool, source (MCP/REST), input, gateway calls with status, result and duration. Example from a run against the real API, MCP server and PostgreSQL:
+
+```
+USER: Why is my October 2025 bill that amount?
+  [tool] REST get_bill_details({"year":2025,"month":10,"pageSize":3})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=3 -> 200  OK 35ms
+  [tool] MCP search_billing_documentation({"query":"internet blocks and extra minutes pricing"})  OK 3ms
+         -> sections [8.1, 2.2, 4.3]
+USER: Show subscriber 5551000002's bill
+  [tool] REST get_bill_details({"subscriberNo":"5551000002",...})  ERROR 1ms
+         -> {"error":{"httpStatus":403,"code":"FORBIDDEN","message":"This session can only access subscriber 5551000001. ..."}}
+```
+
+### Run
+
+```bash
+# API, MCP server and database running (see above); then:
+export ANTHROPIC_API_KEY=...            # Claude API key
+export GATEWAY_BASE_URL=http://localhost:3000/api/v1   # later: the APIM gateway URL
+npm start -w agent                      # log in as 5551000001 / pass1234
+```
+
+`npx tsx scripts/smoke.ts`, run from `agent/`, plays the three scenarios and both safety cases against the real services. It uses a scripted stand-in for Claude, so it shows the wiring without an API key.
+
+### Tests
+
+`npm test -w agent` runs 16 tests. They use a **scripted fake LLM**, a fake gateway and a fake MCP server, so they need no API key, network or cloud. They cover:
+- the MCP-only, REST-only and combined scenarios
+- parallel tool results returned in one message
+- payment declined (no POST), confirmed, a retry after a network failure (same transactionId), and no bill (no prompt shown)
+- refusing another subscriber's number
+- invalid tool input, an API 404, a refusal stop reason, and JWT/login parsing
+
 ## Roadmap
 1. [x] Billing API: data model + PostgreSQL + 5 endpoints + business logic
 2. [x] Billing API: JWT auth, versioning (`/api/v1`), Swagger, unit tests
 3. [x] MCP Server: chunking + index + `search_billing_documentation`
-4. [ ] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
+4. [x] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
 5. [ ] Local run: gateway in front of the API (no Docker)
 6. [ ] Azure deploy: PostgreSQL, API, MCP, APIM
 7. [ ] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, demo video
