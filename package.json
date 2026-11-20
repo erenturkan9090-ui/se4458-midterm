@@ -1,0 +1,18 @@
+{
+  "name": "se4458-billing-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "description": "SE4458 Midterm - Group 2: AI Billing Support Assistant (Agent + MCP + REST API + API Gateway)",
+  "workspaces": [
+    "services/billing-api",
+    "services/mcp-server",
+    "agent"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

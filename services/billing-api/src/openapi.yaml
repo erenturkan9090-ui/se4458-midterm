@@ -1,0 +1,286 @@
+openapi: 3.0.3
+info:
+  title: Mobile Provider Billing API
+  version: 1.0.0
+  description: |
+    SE4458 Midterm - Group 2. Versioned REST API (`/api/v1`) used by the Mobile Provider App
+    and the AI Billing Support Assistant. All public traffic goes through the API Gateway.
+
+    **Billing rules**
+    - Phone: first 1,000 minutes free, then $10 per started 1,000-minute block.
+    - Internet: $50 for up to 20 GB, then $10 per started additional 10 GB block (1 GB = 1,000 MB).
+
+    Payments are simulated; no card processing.
+servers:
+  - url: /api/v1
+tags:
+  - name: Auth
+  - name: Usage
+  - name: Bills
+  - name: Payments
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    SubscriberNo:
+      name: subscriberNo
+      in: path
+      required: true
+      schema: { type: string, pattern: '^\d{4,20}$', example: '5551000001' }
+    Year:
+      name: year
+      in: query
+      required: true
+      schema: { type: integer, minimum: 2000, maximum: 2100, example: 2025 }
+    Month:
+      name: month
+      in: query
+      required: true
+      schema: { type: integer, minimum: 1, maximum: 12, example: 10 }
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              enum: [VALIDATION_ERROR, UNAUTHORIZED, FORBIDDEN, NOT_FOUND, DUPLICATE_TRANSACTION,
+                     AMOUNT_EXCEEDS_BALANCE, BILL_ALREADY_PAID, INTERNAL_ERROR]
+            message: { type: string }
+            details: {}
+    Bill:
+      type: object
+      properties:
+        subscriberNo: { type: string }
+        year: { type: integer }
+        month: { type: integer }
+        billTotal: { type: number, example: 70 }
+        paidAmount: { type: number, example: 0 }
+        remainingBalance: { type: number, example: 70 }
+        status: { type: string, enum: [UNPAID, PARTIALLY_PAID, PAID] }
+        currency: { type: string, example: USD }
+    BillDetailed:
+      allOf:
+        - $ref: '#/components/schemas/Bill'
+        - type: object
+          properties:
+            usage:
+              type: object
+              properties:
+                phoneMinutes: { type: integer, example: 1500 }
+                internetMb: { type: integer, example: 25000 }
+                internetGb: { type: number, example: 25 }
+            charges:
+              type: object
+              properties:
+                phone: { type: number, example: 10 }
+                internet: { type: number, example: 60 }
+                total: { type: number, example: 70 }
+            calculatedAt: { type: string, format: date-time }
+    UsageRecord:
+      type: object
+      properties:
+        id: { type: integer }
+        usageType: { type: string, enum: [PHONE, INTERNET] }
+        amount: { type: integer }
+        unit: { type: string, enum: [MINUTES, MB] }
+        createdAt: { type: string, format: date-time }
+  responses:
+    ValidationError:
+      description: Invalid input
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Unauthorized:
+      description: Missing/invalid token
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    Forbidden:
+      description: Token does not own this subscriber number
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: Subscriber or bill not found
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Obtain a JWT access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, example: '5551000001' }
+                password: { type: string, example: 'pass1234' }
+      responses:
+        '200':
+          description: Token issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken: { type: string }
+                  tokenType: { type: string, example: Bearer }
+                  expiresIn: { type: integer, example: 3600 }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /usage:
+    post:
+      tags: [Usage]
+      summary: Add Usage
+      description: Each unit adds 10 phone minutes (PHONE) or 1 MB (INTERNET). `units` (default 1) is a convenience to add many units at once.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriberNo, year, month, usageType]
+              properties:
+                subscriberNo: { type: string, example: '5551000001' }
+                year: { type: integer, example: 2025 }
+                month: { type: integer, example: 10 }
+                usageType: { type: string, enum: [PHONE, INTERNET] }
+                units: { type: integer, minimum: 1, maximum: 100000, default: 1 }
+      responses:
+        '201':
+          description: Usage recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: SUCCESS }
+                  record: { $ref: '#/components/schemas/UsageRecord' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bills/calculate:
+    post:
+      tags: [Bills]
+      summary: Calculate Bill
+      description: Recalculates the bill for the month from recorded usage. Already paid amount is preserved.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriberNo, year, month]
+              properties:
+                subscriberNo: { type: string, example: '5551000001' }
+                year: { type: integer, example: 2025 }
+                month: { type: integer, example: 10 }
+      responses:
+        '200':
+          description: Bill calculated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: SUCCESS }
+                  bill: { $ref: '#/components/schemas/BillDetailed' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bills/{subscriberNo}:
+    get:
+      tags: [Bills]
+      summary: Query Bill (no authentication)
+      parameters:
+        - $ref: '#/components/parameters/SubscriberNo'
+        - $ref: '#/components/parameters/Year'
+        - $ref: '#/components/parameters/Month'
+      responses:
+        '200':
+          description: Bill summary
+          content: { application/json: { schema: { $ref: '#/components/schemas/Bill' } } }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /bills/{subscriberNo}/detailed:
+    get:
+      tags: [Bills]
+      summary: Query Bill Detailed (auth + paging)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: '#/components/parameters/SubscriberNo'
+        - $ref: '#/components/parameters/Year'
+        - $ref: '#/components/parameters/Month'
+        - { name: page, in: query, schema: { type: integer, minimum: 1, default: 1 } }
+        - { name: pageSize, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Bill with usage/charge breakdown and paged usage records
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/BillDetailed'
+                  - type: object
+                    properties:
+                      usageRecords:
+                        type: object
+                        properties:
+                          items: { type: array, items: { $ref: '#/components/schemas/UsageRecord' } }
+                          page: { type: integer }
+                          pageSize: { type: integer }
+                          totalItems: { type: integer }
+                          totalPages: { type: integer }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /payments:
+    post:
+      tags: [Payments]
+      summary: Pay Bill (simulated)
+      description: Partial or full payment. Duplicate transaction IDs are rejected (409); amounts above the remaining balance are rejected (422).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscriberNo, year, month, amount, transactionId]
+              properties:
+                subscriberNo: { type: string, example: '5551000001' }
+                year: { type: integer, example: 2025 }
+                month: { type: integer, example: 10 }
+                amount: { type: number, example: 30.5, description: 'USD, max 2 decimals' }
+                transactionId: { type: string, example: 'TX-0001' }
+      responses:
+        '201':
+          description: Payment recorded
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    properties:
+                      paymentStatus: { type: string, example: SUCCESS }
+                      transactionId: { type: string }
+                      paymentAmount: { type: number, description: 'Amount of this payment (paidAmount = total paid on the bill)' }
+                  - $ref: '#/components/schemas/Bill'
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: Duplicate transaction ID
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+        '422':
+          description: Amount exceeds remaining balance or bill already paid
+          content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
