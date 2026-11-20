@@ -1,0 +1,35 @@
+<!--
+  Operation-level policy for protected operations (add-usage, calculate-bill,
+  query-bill-detailed, pay-bill). Validates the Bearer JWT at the gateway, the same
+  way the local gateway does, before the request reaches the Billing API.
+  {{jwt-signing-key}} is an APIM named value (secret) holding base64(JWT_SECRET):
+  the API signs with HS256 using the UTF-8 bytes of JWT_SECRET.
+-->
+<policies>
+  <inbound>
+    <base />
+    <validate-jwt header-name="Authorization" require-scheme="Bearer"
+                  failed-validation-httpcode="401"
+                  failed-validation-error-message="A valid Bearer token is required for this operation."
+                  require-expiration-time="true" require-signed-tokens="true">
+      <issuer-signing-keys>
+        <key>{{jwt-signing-key}}</key>
+      </issuer-signing-keys>
+      <audiences>
+        <audience>billing-clients</audience>
+      </audiences>
+      <issuers>
+        <issuer>billing-api</issuer>
+      </issuers>
+    </validate-jwt>
+  </inbound>
+  <backend>
+    <base />
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

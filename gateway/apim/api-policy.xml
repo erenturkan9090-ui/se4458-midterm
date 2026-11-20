@@ -1,0 +1,60 @@
+<!--
+  API-level policy for "billing" v1 (applies to every operation).
+  Mirrors the local gateway (gateway/src/app.ts):
+  - rate limit per subscription (rate-limit-by-key is not available on the Consumption tier)
+  - request id + gateway marker headers
+  - gateway errors returned in the API's error shape with "source": "gateway"
+  The subscription key requirement is set on the API itself (subscriptionRequired = true),
+  and APIM strips Ocp-Apim-Subscription-Key before forwarding.
+-->
+<policies>
+  <inbound>
+    <base />
+    <rate-limit calls="100" renewal-period="60" />
+    <set-header name="x-request-id" exists-action="skip">
+      <value>@(context.RequestId.ToString())</value>
+    </set-header>
+    <set-header name="x-forwarded-prefix" exists-action="override">
+      <value>/billing/v1</value>
+    </set-header>
+    <set-header name="x-gateway-route" exists-action="override">
+      <value>@(context.Operation.Id)</value>
+    </set-header>
+  </inbound>
+  <backend>
+    <forward-request timeout="15" />
+  </backend>
+  <outbound>
+    <base />
+    <set-header name="x-gateway" exists-action="override">
+      <value>azure-apim</value>
+    </set-header>
+    <set-header name="x-request-id" exists-action="override">
+      <value>@(context.RequestId.ToString())</value>
+    </set-header>
+  </outbound>
+  <on-error>
+    <base />
+    <set-header name="Content-Type" exists-action="override">
+      <value>application/json</value>
+    </set-header>
+    <set-header name="x-gateway" exists-action="override">
+      <value>azure-apim</value>
+    </set-header>
+    <set-body>@{
+      var source = context.LastError.Source ?? "gateway";
+      var code = source == "validate-jwt" ? "UNAUTHORIZED"
+               : source == "rate-limit" ? "RATE_LIMITED"
+               : source == "forward-request" ? "BAD_GATEWAY"
+               : (context.LastError.Reason ?? "GATEWAY_ERROR");
+      return new JObject(
+        new JProperty("error", new JObject(
+          new JProperty("code", code),
+          new JProperty("message", context.LastError.Message),
+          new JProperty("source", "gateway"),
+          new JProperty("requestId", context.RequestId.ToString())
+        ))
+      ).ToString();
+    }</set-body>
+  </on-error>
+</policies>

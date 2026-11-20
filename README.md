@@ -210,7 +210,7 @@ All REST traffic goes through the gateway. Clients, the agent included, never ca
 | | URL |
 |---|---|
 | Gateway base (local) | `http://localhost:8000/billing/v1` |
-| Gateway base (Azure) | `https://<apim-name>.azure-api.net/billing/v1` |
+| Gateway base (Azure) | `https://apim-se4458-7ysgwq.azure-api.net/billing/v1` |
 | Backend (not called by clients) | `http://<api>/api/v1` |
 
 ### Routes
@@ -263,13 +263,67 @@ JWT_SECRET=dev-secret npm run dev -w gateway                      # 4. Gateway  
 npm start -w agent                                                # 5. Agent (needs ANTHROPIC_API_KEY)
 ```
 
+## Azure deployment
+
+Everything runs in one resource group (`rg-se4458-billing`) in **Sweden Central**, on an Azure for Students subscription.
+
+| Component | Azure service | URL |
+|---|---|---|
+| API Gateway | API Management, Consumption tier | `https://apim-se4458-7ysgwq.azure-api.net/billing/v1` |
+| Billing API | App Service (Linux, F1, Node 22) | `https://api-se4458-7ysgwq.azurewebsites.net` (Swagger at `/docs`) |
+| MCP server | App Service (same plan) | `https://mcp-se4458-7ysgwq.azurewebsites.net/mcp` (needs `x-api-key`) |
+| Database | PostgreSQL Flexible Server, Burstable B1ms, 32 GB | private to Azure services + the deploy machine |
+
+Clients call only the APIM URL, and every request needs an `Ocp-Apim-Subscription-Key` header.
+
+**APIM setup** (`gateway/apim/`):
+- The API is published at `billing`, version `v1`, using the Segment versioning scheme, so the path is `/billing/v1/...`.
+- The operations come from the same `gateway/src/routes.ts` table as the local gateway.
+- `api-policy.xml` applies to every operation: rate limit, request id, and the error shape with `"source":"gateway"`.
+- `protected-operation-policy.xml` adds `validate-jwt` on the 4 protected operations. The signing key is stored as a secret named value.
+
+**Deploy:** after `az login`, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File infra\azure\deploy.ps1 -Location swedencentral
+```
+
+Every step is idempotent, and you can run a subset of steps, e.g. `-Steps "deploy,apim"`. The script:
+- generates the secrets
+- creates the database and loads the demo data
+- builds and zip-deploys both services
+- configures APIM
+
+Names, secrets and URLs are written to `.env.azure`, which is git-ignored.
+
+**Verified against the cloud deployment** (2026-11-20):
+
+| Request through APIM | Result |
+|---|---|
+| Query Bill without a subscription key | 401 `SubscriptionKeyNotFound` |
+| Query Bill with the key | 200 |
+| Detailed without a JWT, or with a forged one | 401 `UNAUTHORIZED`, rejected at the gateway |
+| Detailed with a valid JWT | 200 |
+| Detailed for another subscriber | 403 from the API |
+| Unpublished path | 404 `OperationNotFound` |
+| Agent smoke script, all 6 scenarios (MCP and REST through APIM) | Passed |
+
+**Notes:**
+- **Region.** Germany West Central is in the Students allowed list, but PostgreSQL provisioning is restricted there for this subscription, so everything runs in Sweden Central.
+- **Cost.** The deployment stays inside the Students free allowances:
+  - PostgreSQL B1ms: 750 h/month for 12 months
+  - App Service F1: free
+  - APIM Consumption: 1M calls/month free
+- **F1 cold starts.** On F1 the apps sleep when idle, so the first request after a pause can take 10–30 s.
+- **Rate limit.** On the Consumption tier `rate-limit-by-key` isn't available. APIM limits per subscription (100 calls/min), while the local gateway limits per key or IP.
+
 ## Roadmap
 1. [x] Billing API: data model + PostgreSQL + 5 endpoints + business logic
 2. [x] Billing API: JWT auth, versioning (`/api/v1`), Swagger, unit tests
 3. [x] MCP Server: chunking + index + `search_billing_documentation`
 4. [x] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
 5. [x] Local run: gateway in front of the API (no Docker)
-6. [ ] Azure deploy: PostgreSQL, API, MCP, APIM
+6. [x] Azure deploy: PostgreSQL, API, MCP, APIM
 7. [ ] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, demo video
 
 ## Assumptions
