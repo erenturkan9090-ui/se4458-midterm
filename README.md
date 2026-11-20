@@ -23,13 +23,14 @@ User ─► AI Agent ◄──► LLM (Claude, tool calling)
 | `services/mcp-server` | MCP SDK server, document chunking + full-text index |
 | `agent` | CLI chat agent: Claude tool calling, MCP client, gateway client |
 | `gateway` | Local API Gateway (route table, JWT check, rate limit) mirroring Azure APIM |
-| `docs` | ER diagram, screenshots, tool traces |
+| `docs` | Tool traces from the Azure deployment (`docs/traces`). The ER diagram is in this README. |
+| `infra/azure` | Azure deploy script (PostgreSQL, App Service, APIM) |
 
 ## Tech decisions
 - **Language:** Node.js + TypeScript
 - **Database:** PostgreSQL (Azure Database for PostgreSQL)
 - **Gateway:** Azure API Management
-- **Cloud:** Azure (App Service / Container Apps)
+- **Cloud:** Azure (App Service for the API and MCP server, APIM as the gateway)
 - **LLM:** Claude API
 
 ## Billing API (`services/billing-api`)
@@ -46,6 +47,65 @@ User ─► AI Agent ◄──► LLM (Claude, tool calling)
 | Pay Bill | `POST /payments` | JWT | – |
 
 The Swagger UI is served at `/docs` and the OpenAPI JSON at `/openapi.json`. The source spec is `services/billing-api/src/openapi.yaml`.
+
+### Data model (ER diagram)
+
+The schema is in `services/billing-api/db/schema.sql`. Money is stored as integer cents.
+
+```mermaid
+erDiagram
+    SUBSCRIBERS ||--o{ ACCOUNTS : "logs in as"
+    SUBSCRIBERS ||--o{ USAGE_RECORDS : "uses"
+    SUBSCRIBERS ||--o{ BILLS : "is billed"
+    BILLS ||--o{ PAYMENTS : "is paid by"
+
+    SUBSCRIBERS {
+        varchar subscriber_no PK
+        varchar full_name
+        timestamptz created_at
+    }
+    ACCOUNTS {
+        varchar username PK
+        varchar password_hash "bcrypt"
+        varchar role "SUBSCRIBER or ADMIN"
+        varchar subscriber_no FK "required for SUBSCRIBER"
+    }
+    USAGE_RECORDS {
+        bigserial id PK
+        varchar subscriber_no FK
+        smallint year
+        smallint month
+        varchar usage_type "PHONE or INTERNET"
+        int amount "minutes or MB"
+        timestamptz created_at
+    }
+    BILLS {
+        varchar subscriber_no PK,FK
+        smallint year PK
+        smallint month PK
+        int phone_minutes
+        int internet_mb
+        int phone_charge_cents
+        int internet_charge_cents
+        int total_cents
+        int paid_cents
+        varchar status "UNPAID, PARTIALLY_PAID or PAID"
+        timestamptz calculated_at
+    }
+    PAYMENTS {
+        varchar transaction_id PK "idempotency key"
+        varchar subscriber_no FK
+        smallint year FK
+        smallint month FK
+        int amount_cents
+        timestamptz created_at
+    }
+```
+
+- **One bill per subscriber per month.** The primary key is `(subscriber_no, year, month)`.
+- **Usage is raw.** `usage_records` holds the raw usage. Calculate Bill sums one month's usage into the bill's `phone_minutes`/`internet_mb` and the charge columns. The index on `(subscriber_no, year, month)` keeps that sum cheap.
+- **Payments are keyed by `transaction_id`.** It is the primary key, so a replayed payment cannot be stored twice (409). The composite foreign key to `bills` means a payment can only exist for a calculated bill.
+- **Check constraints** enforce the valid month and year range, positive amounts, `paid_cents >= 0`, the allowed status and role values, and that a SUBSCRIBER account always has a subscriber number.
 
 ### Run locally (no Docker needed)
 
@@ -66,6 +126,10 @@ The first run downloads the PostgreSQL binaries into `~/.se4458-pg` and stores d
 | `5551000001` | `pass1234` | SUBSCRIBER (Oct 2025 bill: 1,500 min + 25,000 MB = **$70**) |
 | `5551000002` | `pass1234` | SUBSCRIBER (Oct 2025 bill: 3,200 min + 41,500 MB = **$110**) |
 | `admin` | `admin123` | ADMIN |
+
+To restore the demo to its starting state, removing all payments, usage and bills and loading the demo data again:
+- Local: `npm run db:local -w billing-api -- --reset`
+- Azure: `infra\azure\deploy.ps1 -Location swedencentral -Steps reset`
 
 ### Unit tests
 
@@ -171,16 +235,61 @@ The agent is a terminal chat assistant. **Claude** decides which tools to call, 
 
 ### Tool traces
 
-Every tool call is printed in the terminal and appended to `agent/traces/trace-<session>.jsonl`. Each entry records the turn, tool, source (MCP/REST), input, gateway calls with status, result and duration. Example from a run against the real API, MCP server and PostgreSQL:
+Every tool call is printed in the terminal and appended to `agent/traces/trace-<session>.jsonl`. Each entry records:
+- the turn, the tool and its source (MCP or REST)
+- the input
+- the gateway calls with their status
+- the result and the duration
+
+The traces below come from a run against the **Azure deployment**, with REST calls through APIM and the MCP server on App Service. The full files are in `docs/traces/`:
+- `trace-azure-smoke.jsonl` is the JSONL trace.
+- `azure-smoke-console.txt` is the terminal output.
+
+> These traces come from `agent/scripts/smoke.ts`. A scripted stand-in replaces Claude there, so the *tool choice* is fixed by the script. The tool execution, MCP client, gateway, API and database are all real. Traces from a live Claude session will be added once the Claude API key is set (see *LLM cost*).
+
+**Scenario 1: policy question, answered with MCP only**
+
+```
+USER: What does extra internet cost?
+  [tool] MCP search_billing_documentation({"query":"What is the cost of extra internet?"})  OK 124ms
+         -> sections [8.1, 3.2, 4.3]
+```
+
+**Scenario 2: live bill, answered with REST only (through APIM)**
+
+```
+USER: How much is my October 2025 bill?
+  [tool] REST get_bill({"year":2025,"month":10})  GET /bills/5551000001?year=2025&month=10 -> 200  OK 92ms
+         -> {"billTotal":70,"paidAmount":0,"remainingBalance":70,"status":"UNPAID","currency":"USD", ...}
+```
+
+**Scenario 3: "why is my bill this amount?", answered with REST + MCP in one step (two tool calls in parallel)**
 
 ```
 USER: Why is my October 2025 bill that amount?
-  [tool] REST get_bill_details({"year":2025,"month":10,"pageSize":3})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=3 -> 200  OK 35ms
-  [tool] MCP search_billing_documentation({"query":"internet blocks and extra minutes pricing"})  OK 3ms
+  [tool] REST get_bill_details({"year":2025,"month":10,"pageSize":3})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=3 -> 200  OK 126ms
+         -> usage 1,500 min + 25,000 MB; charges phone $10 + internet $60 = $70
+  [tool] MCP search_billing_documentation({"query":"internet blocks and extra minutes pricing"})  OK 83ms
          -> sections [8.1, 2.2, 4.3]
+```
+
+The answer combines the two results:
+- 1,500 minutes is one extra 1,000-minute block, so $10 (§2.2).
+- 25 GB is the 20 GB base ($50) plus one started 10 GB block ($10), so $60 (§3.2 / §8.1).
+
+**Safety cases from the same run**
+
+```
 USER: Show subscriber 5551000002's bill
-  [tool] REST get_bill_details({"subscriberNo":"5551000002",...})  ERROR 1ms
+  [tool] REST get_bill_details({"subscriberNo":"5551000002",...})  ERROR 1ms          <- refused before any HTTP call
          -> {"error":{"httpStatus":403,"code":"FORBIDDEN","message":"This session can only access subscriber 5551000001. ..."}}
+USER: Pay 20 dollars of my October bill        (human answers "no")
+  [confirm] {"amount":20,"billTotal":70,"remainingBalance":70} -> no
+  [tool] REST pay_bill(...)  GET /bills/... -> 200  ERROR        -> {"paymentStatus":"NOT_SUBMITTED", ...}   <- no POST sent
+USER: Pay 20 dollars of my October bill        (human answers "yes")
+  [confirm] {"amount":20,"billTotal":70,"remainingBalance":70} -> yes
+  [tool] REST pay_bill(...)  GET /bills/... -> 200, POST /payments -> 201  OK
+         -> {"paymentStatus":"SUCCESS","transactionId":"agent-6802393a-...","remainingBalance":50,"status":"PARTIALLY_PAID"}
 ```
 
 ### Run
@@ -193,6 +302,38 @@ npm start -w agent                      # log in as 5551000001 / pass1234
 ```
 
 `npx tsx scripts/smoke.ts`, run from `agent/`, plays the three scenarios and both safety cases against the real services. It uses a scripted stand-in for Claude, so it shows the wiring without an API key.
+
+### LLM cost
+
+The model is Claude Opus 5.5 (`claude-opus-5-5`). Its list prices per million tokens are:
+
+| | Price per MTok |
+|---|---|
+| Input | $4 |
+| Cache write (5 min) | $5 |
+| Cache read | $0.20 |
+| Output (thinking included) | $20 |
+
+The CLI counts the real token usage of every call. It prints the totals and the cost when the session ends:
+
+```
+LLM usage: <calls> calls, <input> input + <cache-write> cache-write + <cache-read> cache-read + <output> output tokens ≈ $<cost>
+```
+
+**Estimate per question** (calculated by hand; to be replaced with measured numbers after the live Claude run):
+- **The fixed prefix is about 1.3k tokens.** The system prompt is about 1.9k characters and the four tool definitions about 3.2k characters, at roughly 4 characters per token. The prefix is prompt-cached, so after the first request it is billed at the cache-read price.
+- **A question takes two requests.** One returns the tool call(s), the next the answer.
+- **Input per question:** about 0.5–1.5k new input tokens, for the question and the tool results. Three MCP sections or one detailed bill is a few hundred tokens.
+- **Output per question:** about 300–800 tokens, for the tool call, a short thinking pass at `medium` effort, and the answer.
+
+| | Tokens | Cost |
+|---|---|---|
+| First question (cache write) | ~1.3k cache write + ~1k input + ~600 output | ≈ $0.02 |
+| Later questions in the session | ~2.6k cache read + ~1k input + ~600 output | ≈ $0.017 |
+| Demo session, ~10 questions | | **≈ $0.15–0.25** |
+| 1,000 questions per month | | **≈ $15–25** |
+
+Output tokens are about 70% of the cost. A cheaper deployment would use a lower `effort` or a smaller model such as Claude Haiku 5.5 for simple lookups. That would need re-testing that the model still picks the right tool and still refuses unsafe requests.
 
 ### Tests
 
@@ -324,7 +465,13 @@ Names, secrets and URLs are written to `.env.azure`, which is git-ignored.
 4. [x] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
 5. [x] Local run: gateway in front of the API (no Docker)
 6. [x] Azure deploy: PostgreSQL, API, MCP, APIM
-7. [ ] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, demo video
+7. [x] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, LLM cost
+8. [ ] Live Claude run: traces and measured token cost
+9. [ ] Demo video
+
+## Demo video
+
+Video link: _to be added_
 
 ## Assumptions
 

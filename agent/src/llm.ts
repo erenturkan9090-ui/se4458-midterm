@@ -16,19 +16,26 @@ export interface LlmClient {
 export class UsageMeter {
   inputTokens = 0;
   outputTokens = 0;
+  cacheWriteTokens = 0;
   cacheReadTokens = 0;
   calls = 0;
 
   add(u: Anthropic.Beta.BetaUsage) {
     this.calls += 1;
-    this.inputTokens += u.input_tokens + (u.cache_creation_input_tokens ?? 0);
+    this.inputTokens += u.input_tokens;
+    this.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
     this.cacheReadTokens += u.cache_read_input_tokens ?? 0;
     this.outputTokens += u.output_tokens;
   }
 
-  /** USD at Claude Opus 5.5 list prices: $4 / MTok input, $0.20 / MTok cache read, $20 / MTok output. */
+  /**
+   * USD at Claude Opus 5.5 list prices per MTok: $4 input, $5 cache write (5-minute TTL),
+   * $0.20 cache read, $20 output (thinking tokens are billed as output).
+   */
   costUsd(): number {
-    return (this.inputTokens * 4 + this.cacheReadTokens * 0.2 + this.outputTokens * 20) / 1_000_000;
+    return (
+      this.inputTokens * 4 + this.cacheWriteTokens * 5 + this.cacheReadTokens * 0.2 + this.outputTokens * 20
+    ) / 1_000_000;
   }
 }
 

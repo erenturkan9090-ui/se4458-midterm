@@ -35,7 +35,12 @@ async function main() {
   const gateway = new GatewayClient(cfg.gatewayBaseUrl, cfg.gatewaySubscriptionKey);
   const session = await gateway.login('5551000001', 'pass1234');
   const mcp = await McpToolClient.connect(cfg.mcpServerUrl, cfg.mcpApiKey);
-  const trace = new TraceRecorder({ echo: (e) => console.log(formatTrace(e)) });
+  // SMOKE_TRACE_DIR also writes the trace as JSONL (used for docs/traces).
+  const trace = new TraceRecorder({
+    dir: process.env.SMOKE_TRACE_DIR,
+    sessionId: process.env.SMOKE_TRACE_DIR ? 'azure-smoke' : undefined,
+    echo: (e) => console.log(formatTrace(e)),
+  });
   let answer = false;
   const tools = new ToolRegistry(session, gateway, mcp, async (req) => {
     console.log(`  [confirm] ${JSON.stringify(req)} -> ${answer ? 'yes' : 'no'}`);

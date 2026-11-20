@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Pool } from 'pg';
-import { seed } from '../src/seed';
+import { resetDemo, seed } from '../src/seed';
 
 const PORT = Number(process.env.LOCAL_PG_PORT ?? 5432);
 const PG_HOME = process.env.LOCAL_PG_HOME ?? path.join(os.homedir(), '.se4458-pg');
@@ -53,7 +53,13 @@ async function main() {
 
   const url = `postgresql://billing:billing@localhost:${PORT}/billing`;
   const pool = new Pool({ connectionString: url });
-  await seed(pool);
+  // --reset (npm run db:local -w billing-api -- --reset) wipes payments/usage/bills first.
+  if (process.argv.includes('--reset')) {
+    await resetDemo(pool);
+    console.log('Demo data reset');
+  } else {
+    await seed(pool);
+  }
   await pool.end();
 
   console.log(`PostgreSQL ready: ${url}`);

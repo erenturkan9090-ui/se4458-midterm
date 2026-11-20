@@ -147,13 +147,24 @@ if ($StepList -contains "db") {
     -n deploy-client --start-ip-address $myIp --end-ip-address $myIp -o none
 }
 
-if ($StepList -contains "seed") {
-  Write-Step "Schema + demo data"
+# "seed" loads demo data; "reset" wipes payments/usage/bills and loads it again (before a demo).
+if (($StepList -contains "seed") -or ($StepList -contains "reset")) {
+  $reset = $StepList -contains "reset"
+  Write-Step $(if ($reset) { "Reset demo data" } else { "Schema + demo data" })
+  if (-not ($StepList -contains "db")) {
+    # The client IP may have changed since the server was created.
+    $myIp = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 15).ToString().Trim()
+    Write-Host "Allowing client IP $myIp"
+    Invoke-Az postgres flexible-server firewall-rule create -g $ResourceGroup -s $PgServer `
+      -n deploy-client --start-ip-address $myIp --end-ip-address $myIp -o none
+  }
   $env:DATABASE_URL = $DatabaseUrl
   $env:DATABASE_SSL = "true"
   Push-Location $RepoRoot
   try {
-    Invoke-Native npx tsx services/billing-api/src/seed.ts | Write-Host
+    $seedArgs = @("tsx", "services/billing-api/src/seed.ts")
+    if ($reset) { $seedArgs += "--reset" }
+    Invoke-Native npx @seedArgs | Write-Host
     if ($LASTEXITCODE -ne 0) { throw "seed failed" }
   } finally { Pop-Location; Remove-Item Env:DATABASE_URL, Env:DATABASE_SSL -ErrorAction SilentlyContinue }
 }

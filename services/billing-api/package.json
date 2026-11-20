@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.build.json && node -e \"require('fs').copyFileSync('src/openapi.yaml','dist/openapi.yaml')\"",
     "start": "node dist/server.js",
     "db:seed": "tsx src/seed.ts",
+    "db:reset": "tsx src/seed.ts --reset",
     "db:local": "tsx scripts/local-db.ts",
     "test": "jest"
   },

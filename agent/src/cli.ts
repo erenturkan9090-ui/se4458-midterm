@@ -90,7 +90,7 @@ async function main() {
   const u = llm.usage;
   console.log(
     dim(
-      `\nLLM usage: ${u.calls} calls, ${u.inputTokens} input + ${u.cacheReadTokens} cached + ${u.outputTokens} output tokens ` +
+      `\nLLM usage: ${u.calls} calls, ${u.inputTokens} input + ${u.cacheWriteTokens} cache-write + ${u.cacheReadTokens} cache-read + ${u.outputTokens} output tokens ` +
         `≈ $${u.costUsd().toFixed(4)}. Trace: ${trace.file}`,
     ),
   );

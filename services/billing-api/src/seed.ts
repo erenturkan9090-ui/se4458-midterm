@@ -56,13 +56,24 @@ export async function seed(pool: Pool) {
   }
 }
 
+/**
+ * Puts the demo back to its starting state: removes all payments, usage and bills
+ * (accounts and subscribers stay), then seeds again. Used before recording the demo.
+ */
+export async function resetDemo(pool: Pool) {
+  await pool.query(fs.readFileSync(path.join(__dirname, '..', 'db', 'schema.sql'), 'utf8'));
+  await pool.query('TRUNCATE payments, bills, usage_records RESTART IDENTITY');
+  await seed(pool);
+}
+
 if (require.main === module) {
+  const reset = process.argv.includes('--reset');
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: true } : undefined,
   });
-  seed(pool)
-    .then(() => console.log('Seed complete'))
+  (reset ? resetDemo(pool) : seed(pool))
+    .then(() => console.log(reset ? 'Demo data reset' : 'Seed complete'))
     .catch((e) => {
       console.error(e);
       process.exitCode = 1;
