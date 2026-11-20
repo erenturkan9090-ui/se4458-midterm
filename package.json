@@ -6,7 +6,8 @@
   "workspaces": [
     "services/billing-api",
     "services/mcp-server",
-    "agent"
+    "agent",
+    "gateway"
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",

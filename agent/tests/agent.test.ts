@@ -28,7 +28,7 @@ describe('scenario 2: REST only (live bill)', () => {
     ]);
     await agent.send('How much is my October 2025 bill?');
     expect(gw.calls).toHaveLength(1);
-    expect(gw.calls[0].url).toBe('http://gw.test/api/v1/bills/5551000001?year=2025&month=10');
+    expect(gw.calls[0].url).toBe('http://gw.test/billing/v1/bills/5551000001?year=2025&month=10');
     expect(gw.calls[0].headers['Ocp-Apim-Subscription-Key']).toBe('sub-key');
     expect(trace.entries[0]).toMatchObject({
       source: 'REST',
@@ -192,14 +192,14 @@ describe('gateway client', () => {
   it('login reads role and subscriber number from the JWT', async () => {
     const payload = Buffer.from(JSON.stringify({ sub: '5551000001', role: 'SUBSCRIBER', sno: '5551000001' })).toString('base64url');
     const token = `h.${payload}.s`;
-    const client = new GatewayClient('http://gw.test/api/v1', undefined, async () =>
+    const client = new GatewayClient('http://gw.test/billing/v1', undefined, async () =>
       new Response(JSON.stringify({ accessToken: token }), { status: 200 }),
     );
     await expect(client.login('5551000001', 'pw')).resolves.toEqual({ ...ALICE, accessToken: token });
   });
 
   it('login failure surfaces the API error code', async () => {
-    const client = new GatewayClient('http://gw.test/api/v1', undefined, async () =>
+    const client = new GatewayClient('http://gw.test/billing/v1', undefined, async () =>
       new Response(JSON.stringify({ error: { code: 'UNAUTHORIZED', message: 'Invalid username or password' } }), { status: 401 }),
     );
     await expect(client.login('x', 'y')).rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });

@@ -22,7 +22,7 @@ User ─► AI Agent ◄──► LLM (Claude, tool calling)
 | `services/billing-api` | Express + TypeScript REST API, Swagger, JWT, unit tests (Jest) |
 | `services/mcp-server` | MCP SDK server, document chunking + full-text index |
 | `agent` | CLI chat agent: Claude tool calling, MCP client, gateway client |
-| `gateway` | API Gateway route definitions / policies |
+| `gateway` | Local API Gateway (route table, JWT check, rate limit) mirroring Azure APIM |
 | `docs` | ER diagram, screenshots, tool traces |
 
 ## Tech decisions
@@ -186,9 +186,9 @@ USER: Show subscriber 5551000002's bill
 ### Run
 
 ```bash
-# API, MCP server and database running (see above); then:
+# Database, API, MCP server and gateway running (see "Run the whole stack locally"); then:
 export ANTHROPIC_API_KEY=...            # Claude API key
-export GATEWAY_BASE_URL=http://localhost:3000/api/v1   # later: the APIM gateway URL
+export GATEWAY_BASE_URL=http://localhost:8000/billing/v1   # on Azure: the APIM gateway URL
 npm start -w agent                      # log in as 5551000001 / pass1234
 ```
 
@@ -203,12 +203,72 @@ npm start -w agent                      # log in as 5551000001 / pass1234
 - refusing another subscriber's number
 - invalid tool input, an API 404, a refusal stop reason, and JWT/login parsing
 
+## API Gateway (`gateway`)
+
+All REST traffic goes through the gateway. Clients, the agent included, never call the API directly. The deployed gateway is **Azure API Management**. The local gateway in `gateway/` follows the same route table and rules, so the whole flow runs and is tested without the cloud.
+
+| | URL |
+|---|---|
+| Gateway base (local) | `http://localhost:8000/billing/v1` |
+| Gateway base (Azure) | `https://<apim-name>.azure-api.net/billing/v1` |
+| Backend (not called by clients) | `http://<api>/api/v1` |
+
+### Routes
+
+The route table is `gateway/src/routes.ts`. The gateway publishes only these routes:
+
+| Gateway route (`/billing/v1` + …) | Backend | Protected at gateway |
+|---|---|---|
+| `POST /auth/login` | `POST /api/v1/auth/login` | – |
+| `POST /usage` | `POST /api/v1/usage` | JWT |
+| `POST /bills/calculate` | `POST /api/v1/bills/calculate` | JWT |
+| `GET /bills/{subscriberNo}` | `GET /api/v1/bills/{subscriberNo}` | – |
+| `GET /bills/{subscriberNo}/detailed` | `GET /api/v1/bills/{subscriberNo}/detailed` | JWT |
+| `POST /payments` | `POST /api/v1/payments` | JWT |
+
+### Gateway rules (same as the APIM policies)
+
+1. **Subscription key.** When `GATEWAY_SUBSCRIPTION_KEY` is set, a missing or wrong `Ocp-Apim-Subscription-Key` returns 401. The key is removed before the request is forwarded.
+2. **Route table.**
+   - A path that isn't in the table returns 404 `ROUTE_NOT_FOUND`. This includes other versions such as `/billing/v2/...` and direct `/api/v1/...` calls.
+   - A wrong method returns 405 with an `Allow` header.
+3. **Rate limit.** Requests are limited per subscription key or client IP, 100 per minute by default. Above that the gateway returns 429 `RATE_LIMITED` with `Retry-After`.
+4. **JWT on protected routes.** These need a Bearer HS256 token with issuer `billing-api` and audience `billing-clients`, signed with `JWT_SECRET`. Otherwise the gateway returns 401 and the request never reaches the API. The API still does its own per-subscriber 403 check.
+5. **Forwarding.** The gateway adds `x-request-id`, `x-forwarded-*` and `x-gateway-route`. Backend errors pass through unchanged.
+   - If the backend is down, the gateway returns 502 `BAD_GATEWAY`.
+   - If it times out, the gateway returns 504 `GATEWAY_TIMEOUT`.
+6. **Logging.** Each request is logged as one JSON line: request id, method, path, route, status and ms.
+
+Gateway errors use the API's error shape, plus `"source": "gateway"`. Example from a real run:
+
+```
+$ curl -i http://localhost:8000/billing/v1/bills/5551000001/detailed?year=2025&month=10
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer
+{"error":{"code":"UNAUTHORIZED","message":"A valid Bearer token is required for this operation.","source":"gateway"}}
+```
+
+`npm test -w gateway` runs 12 tests against a fake backend:
+- **Success cases:** public and protected routing, body, query and header forwarding, passing through backend errors, and literal-route precedence.
+- **Failure cases:** missing, expired and forged JWTs, unpublished routes and versions, wrong method, subscription key, rate limit, and a backend that is down.
+
+### Run the whole stack locally
+
+```bash
+npm run db:local -w billing-api                                   # 1. PostgreSQL + demo data (keep open)
+DATABASE_URL=postgresql://billing:billing@localhost:5432/billing JWT_SECRET=dev-secret \
+  npm run dev -w billing-api                                      # 2. API      :3000
+npm run dev -w mcp-server                                         # 3. MCP      :4000
+JWT_SECRET=dev-secret npm run dev -w gateway                      # 4. Gateway  :8000/billing/v1
+npm start -w agent                                                # 5. Agent (needs ANTHROPIC_API_KEY)
+```
+
 ## Roadmap
 1. [x] Billing API: data model + PostgreSQL + 5 endpoints + business logic
 2. [x] Billing API: JWT auth, versioning (`/api/v1`), Swagger, unit tests
 3. [x] MCP Server: chunking + index + `search_billing_documentation`
 4. [x] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
-5. [ ] Local run: gateway in front of the API (no Docker)
+5. [x] Local run: gateway in front of the API (no Docker)
 6. [ ] Azure deploy: PostgreSQL, API, MCP, APIM
 7. [ ] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, demo video
 

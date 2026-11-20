@@ -77,7 +77,7 @@ export function fakeGateway(opts: { failNetworkOnce?: boolean } = {}) {
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     calls.push({ method: String(init.method), url, headers, body });
     const u = new URL(url);
-    const path = u.pathname.replace(/^\/api\/v1/, '');
+    const path = u.pathname.replace(/^\/billing\/v1/, '');
     const authed = headers.Authorization === 'Bearer alice-token' ? '5551000001' : null;
 
     let m = /^\/bills\/(\d+)(\/detailed)?$/.exec(path);
@@ -112,7 +112,7 @@ export function fakeGateway(opts: { failNetworkOnce?: boolean } = {}) {
     return err(404, 'NOT_FOUND', 'Route not found');
   };
 
-  return { calls, bills, client: new GatewayClient('http://gw.test/api/v1', 'sub-key', fetchFn) };
+  return { calls, bills, client: new GatewayClient('http://gw.test/billing/v1', 'sub-key', fetchFn) };
 }
 
 export function fakeMcp(): McpGateway & { calls: { name: string; args: Record<string, unknown> }[] } {
