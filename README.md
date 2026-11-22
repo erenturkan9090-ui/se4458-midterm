@@ -585,11 +585,17 @@ Names, secrets and URLs are written to `.env.azure`, which is git-ignored.
 6. [x] Azure deploy: PostgreSQL, API, MCP, APIM
 7. [x] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, LLM cost
 8. [x] Live LLM run (Gemini): traces and measured token usage
-9. [ ] Demo video
+9. [x] Demo video
 
 ## Demo video
 
-Video link: _to be added_
+Video link: https://drive.google.com/file/d/1m5nN4Hx28KT9kovrVZIRi7u-QRRfFqrl/view?usp=sharing
+
+The video is in Turkish and runs against the Azure deployment. It shows the architecture, the Swagger UI, and the agent with Gemini function calling:
+- a policy question answered with MCP only
+- a bill question answered with REST only, through APIM
+- a "why is my bill $70" question answered with REST and MCP
+- a payment confirmed by the user
 
 ## Assumptions
 
