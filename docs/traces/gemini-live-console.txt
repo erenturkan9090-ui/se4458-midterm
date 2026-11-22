@@ -1,0 +1,94 @@
+PS> npm run start:azure -w agent        (GEMINI_MODEL=gemini-3.5-flash, 2026-11-22)
+
+AI Billing Support Assistant
+gateway: https://apim-se4458-7ysgwq.azure-api.net/billing/v1
+mcp:     https://mcp-se4458-7ysgwq.azurewebsites.net/mcp
+model:   gemini-3.5-flash (Gemini)
+
+Logged in as 5551000001 (SUBSCRIBER, subscriber 5551000001)
+
+Ask about your bill, usage, payments or billing rules. Type "exit" to quit.
+
+You: What does extra internet cost?
+  [tool] MCP search_billing_documentation({"query":"extra internet cost pricing rules"})  OK 357ms
+         -> sections [8.1, 3.2, 3.1]
+Assistant: The basic plan includes up to 20 GB of internet for $50 per month (Billing Guide §3.1).
+
+If you exceed 20 GB, additional internet is charged as follows:
+* Each additional **10 GB block costs $10** (Billing Guide §3.2, §8.1).
+* **Partially used blocks are rounded up** and charged as a full block (Billing Guide §3.2).
+
+**Examples:**
+* 20 GB: $50
+* 21 GB to 30 GB: $60 ($50 base + $10 for 1 additional block)
+* 31 GB to 40 GB: $70 ($50 base + $20 for 2 additional blocks)
+
+You: How much is my October 2025 bill?
+  [tool] REST get_bill({"year":2025,"month":10})  GET /bills/5551000001?year=2025&month=10 -> 200  OK 852ms
+         -> {"subscriberNo":"5551000001","year":2025,"month":10,"billTotal":70,"paidAmount":0,"remainingBalance":70,"status":"UNPAID","currency":"USD"}
+Assistant: Your bill for **October 2025** is **$70.00**.
+
+* **Total Bill:** $70.00
+* **Amount Paid:** $0.00
+* **Remaining Balance:** $70.00
+* **Status:** UNPAID
+
+You: Why is my October 2025 bill 70 dollars?
+  [tool] REST get_bill_details({"year":2025,"month":10})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=20 -> 200  OK 757ms
+         -> {"subscriberNo":"5551000001","year":2025,"month":10,"billTotal":70,"paidAmount":0,"remainingBalance":70,"status":"UNPAID","currency":"USD","usage":{"phoneMinute
+  [tool] MCP search_billing_documentation({"query":"phone pricing call minutes free minutes internet cost"})  OK 408ms
+         -> sections [2.1, 2.2, 3.1]
+Assistant: Your October 2025 bill is **$70.00** based on the following usage breakdown:
+
+### 1. Phone Charges: $10.00
+* **Usage:** 1,500 minutes
+* **Calculation:** The first 1,000 minutes are free (Billing Guide §2.1). The remaining 500 minutes enter an additional 1,000-minute block, which is charged as a full block for **$10.00** (Billing Guide §2.2).
+
+### 2. Internet Charges: $60.00
+* **Usage:** 25,000 MB (~25 GB)
+* **Calculation:** Base internet covers up to 20 GB for **$50.00** (Billing Guide §3.1). The extra 5 GB enters an additional 10 GB block, charged at **$10.00** (Billing Guide §3.2).
+  * $50 base + $10 extra block = **$60.00**
+
+---
+**Total:** $10 (Phone) + $60 (Internet) = **$70.00**
+
+You: Show me subscriber 5551000002's bill
+Assistant: I am only able to access information for your own account (subscriber **5551000001**). For privacy and account safety reasons, I cannot view or manage bills for other subscriber numbers.
+
+You: Pay 20 dollars of my October bill
+
+  PAYMENT CONFIRMATION
+  Subscriber: 5551000001
+  Period:     10/2025
+  Bill total: $70.00   remaining: $70.00
+  Pay now:    $20.00
+  Type "yes" to pay, anything else to cancel: no
+  -> cancelled by user
+  [tool] REST pay_bill({"month":10,"amount":20,"year":2025})  GET /bills/5551000001?year=2025&month=10 -> 200  ERROR 3612ms
+         -> {"paymentStatus":"NOT_SUBMITTED","reason":"The user did not confirm the payment. Nothing was paid."}
+Assistant: The payment was not confirmed, so **nothing was paid**.
+
+Your remaining balance for October 2025 stays at **$70.00**. Please let me know if you would like to try again or if you have any other questions!
+
+You: Pay 20 dollars of my October bill
+
+  PAYMENT CONFIRMATION
+  Subscriber: 5551000001
+  Period:     10/2025
+  Bill total: $70.00   remaining: $70.00
+  Pay now:    $20.00
+  Type "yes" to pay, anything else to cancel: yes
+  -> confirmed by user
+  [tool] REST pay_bill({"month":10,"year":2025,"amount":20})  GET /bills/5551000001?year=2025&month=10 -> 200, POST /payments -> 201  OK 27545ms
+         -> {"paymentStatus":"SUCCESS","transactionId":"agent-19a13a5a-879f-40ab-848a-dcb166ed08ea","paymentAmount":20,"subscriberNo":"5551000001","year":2025,"month":10,"b
+Assistant: Your payment was successful!
+
+* **Subscriber:** 5551000001
+* **Billing Period:** October 2025
+* **Amount Paid:** $20.00
+* **Transaction ID:** `agent-19a13a5a-879f-40ab-848a-dcb166ed08ea`
+* **New Remaining Balance:** $50.00
+
+You: exit
+
+LLM usage: 12 calls, 36719 input + 0 cache-write + 0 cache-read + 2632 output tokens ≈ $0.0000 (Gemini free tier). Trace: traces\trace-2026-11-22T08-47-48-014Z-e3c8.jsonl

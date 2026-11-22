@@ -22,7 +22,8 @@
     </set-header>
   </inbound>
   <backend>
-    <forward-request timeout="15" />
+    <!-- 45 s: the F1 backend can take 20-30 s to wake up after being idle. -->
+    <forward-request timeout="45" />
   </backend>
   <outbound>
     <base />

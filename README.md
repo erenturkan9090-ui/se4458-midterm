@@ -1,6 +1,6 @@
 # SE4458 Midterm — AI Billing Support Assistant (Group 2)
 
-A conversational assistant for mobile subscribers. It answers questions about billing rules, current bills, detailed usage and payments. An LLM (Claude) picks which tools to use, and the agent runs them:
+A conversational assistant for mobile subscribers. It answers questions about billing rules, current bills, detailed usage and payments. An LLM (Gemini, or Claude) picks which tools to use, and the agent runs them:
 
 - **MCP Server**: `search_billing_documentation(query)` searches the indexed `Mobile_Provider_Billing_Guide.md`.
 - **Billing REST API**, reached through the **API Gateway**: Add Usage, Calculate Bill, Query Bill, Query Bill Detailed, Pay Bill.
@@ -8,7 +8,7 @@ A conversational assistant for mobile subscribers. It answers questions about bi
 ## Architecture
 
 ```
-User ─► AI Agent ◄──► LLM (Claude, tool calling)
+User ─► AI Agent ◄──► LLM (Gemini or Claude, function calling)
            │
            ├─► MCP Client ─► MCP Server ─► indexed billing guide
            │
@@ -21,7 +21,7 @@ User ─► AI Agent ◄──► LLM (Claude, tool calling)
 |---|---|
 | `services/billing-api` | Express + TypeScript REST API, Swagger, JWT, unit tests (Jest) |
 | `services/mcp-server` | MCP SDK server, document chunking + full-text index |
-| `agent` | CLI chat agent: Claude tool calling, MCP client, gateway client |
+| `agent` | CLI chat agent: LLM function calling (Gemini or Claude), MCP client, gateway client |
 | `gateway` | Local API Gateway (route table, JWT check, rate limit) mirroring Azure APIM |
 | `docs` | Tool traces from the Azure deployment (`docs/traces`). The ER diagram is in this README. |
 | `infra/azure` | Azure deploy script (PostgreSQL, App Service, APIM) |
@@ -31,7 +31,7 @@ User ─► AI Agent ◄──► LLM (Claude, tool calling)
 - **Database:** PostgreSQL (Azure Database for PostgreSQL)
 - **Gateway:** Azure API Management
 - **Cloud:** Azure (App Service for the API and MCP server, APIM as the gateway)
-- **LLM:** Claude API
+- **LLM:** Gemini API (free tier) for the demo. Claude API is supported through the same interface (`LLM_PROVIDER`).
 
 ## Billing API (`services/billing-api`)
 
@@ -203,12 +203,22 @@ If `MCP_API_KEY` is set, every `/mcp` request must send it in the `x-api-key` he
 
 ## AI Agent (`agent`)
 
-The agent is a terminal chat assistant. **Claude** decides which tools to call, and the agent code runs them.
+The agent is a terminal chat assistant. **The LLM** decides which tools to call, and the agent code runs them.
 
-- **LLM:** Claude Opus 5.5 (`claude-opus-5-5`) through the Messages API, with effort `medium` and adaptive thinking. The tool loop is written by hand in `src/agent.ts`: send the history, run every `tool_use` block, return all `tool_result`s in one message, and repeat until `end_turn`.
-  - The full assistant content is kept in the history unchanged.
-  - The `fallbacks: "default"` safety fallback is turned on.
-  - The tools and system prompt are prompt-cached across the turns of a session.
+- **LLM:** two providers sit behind the same `LlmClient` interface (`src/llm.ts`). Both use real function calling. `LLM_PROVIDER` picks one; when it is not set, Gemini is used if only `GEMINI_API_KEY` is present.
+
+  | Provider | Model | Notes |
+  |---|---|---|
+  | **Gemini** (used for the demo) | `gemini-3.5-flash` (`GEMINI_MODEL`) | Gemini API **free tier**. `src/gemini.ts` maps the tools to `functionDeclarations` with function-calling mode `AUTO`. `npm run models -w agent` lists the models a key can use. |
+  | Claude | Claude Opus 5.5 (`claude-opus-5-5`) | Messages API with effort `medium`, adaptive thinking, the `fallbacks: "default"` safety fallback, and a prompt-cached tools + system prefix. |
+
+- **Tool loop:** the loop is written by hand in `src/agent.ts` and is the same for both providers:
+  1. Send the history.
+  2. Run every tool call in the reply.
+  3. Return all results in one message.
+  4. Repeat until the model answers without a tool call.
+
+  The model's own turns are kept in the history unchanged. For Gemini this includes the thought signatures that multi-step function calling needs.
 - **MCP client:** the agent connects to the MCP server over Streamable HTTP and discovers its tools with `tools/list`. `search_billing_documentation` is therefore not hard-coded in the agent.
 - **REST tools:** these call the Billing API through the API Gateway (`GATEWAY_BASE_URL`), and send `Ocp-Apim-Subscription-Key` when it is set.
   - `get_bill` calls Query Bill.
@@ -241,71 +251,120 @@ Every tool call is printed in the terminal and appended to `agent/traces/trace-<
 - the gateway calls with their status
 - the result and the duration
 
-The traces below come from a run against the **Azure deployment**, with REST calls through APIM and the MCP server on App Service. The full files are in `docs/traces/`:
-- `trace-azure-smoke.jsonl` is the JSONL trace.
-- `azure-smoke-console.txt` is the terminal output.
-
-> These traces come from `agent/scripts/smoke.ts`. A scripted stand-in replaces Claude there, so the *tool choice* is fixed by the script. The tool execution, MCP client, gateway, API and database are all real. Traces from a live Claude session will be added once the Claude API key is set (see *LLM cost*).
+The traces below come from a **live session with Gemini** (`gemini-3.5-flash`, 2026-11-22) against the **Azure deployment**. REST calls went through APIM, and the MCP server ran on App Service. Gemini chose every tool call itself; nothing was scripted. The full files are in `docs/traces/`:
+- `trace-gemini-live.jsonl` is the JSONL trace.
+- `gemini-live-console.txt` is the full terminal session, with the model's answers.
 
 **Scenario 1: policy question, answered with MCP only**
 
 ```
-USER: What does extra internet cost?
-  [tool] MCP search_billing_documentation({"query":"What is the cost of extra internet?"})  OK 124ms
-         -> sections [8.1, 3.2, 4.3]
+You: What does extra internet cost?
+  [tool] MCP search_billing_documentation({"query":"extra internet cost pricing rules"})  OK 357ms
+         -> sections [8.1, 3.2, 3.1]
+Assistant: The basic plan includes up to 20 GB of internet for $50 per month (Billing Guide §3.1).
+If you exceed 20 GB ... Each additional 10 GB block costs $10 (Billing Guide §3.2, §8.1).
+Partially used blocks are rounded up and charged as a full block (Billing Guide §3.2). ...
 ```
 
 **Scenario 2: live bill, answered with REST only (through APIM)**
 
 ```
-USER: How much is my October 2025 bill?
-  [tool] REST get_bill({"year":2025,"month":10})  GET /bills/5551000001?year=2025&month=10 -> 200  OK 92ms
-         -> {"billTotal":70,"paidAmount":0,"remainingBalance":70,"status":"UNPAID","currency":"USD", ...}
+You: How much is my October 2025 bill?
+  [tool] REST get_bill({"year":2025,"month":10})  GET /bills/5551000001?year=2025&month=10 -> 200  OK 852ms
+         -> {"subscriberNo":"5551000001","year":2025,"month":10,"billTotal":70,"paidAmount":0,"remainingBalance":70,"status":"UNPAID","currency":"USD"}
+Assistant: Your bill for October 2025 is $70.00. Total $70.00, paid $0.00, remaining $70.00, status UNPAID.
 ```
 
-**Scenario 3: "why is my bill this amount?", answered with REST + MCP in one step (two tool calls in parallel)**
+**Scenario 3: "why is my bill this amount?", answered with REST and MCP combined**
 
 ```
-USER: Why is my October 2025 bill that amount?
-  [tool] REST get_bill_details({"year":2025,"month":10,"pageSize":3})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=3 -> 200  OK 126ms
+You: Why is my October 2025 bill 70 dollars?
+  [tool] REST get_bill_details({"year":2025,"month":10})  GET /bills/5551000001/detailed?year=2025&month=10&page=1&pageSize=20 -> 200  OK 757ms
          -> usage 1,500 min + 25,000 MB; charges phone $10 + internet $60 = $70
-  [tool] MCP search_billing_documentation({"query":"internet blocks and extra minutes pricing"})  OK 83ms
-         -> sections [8.1, 2.2, 4.3]
+  [tool] MCP search_billing_documentation({"query":"phone pricing call minutes free minutes internet cost"})  OK 408ms
+         -> sections [2.1, 2.2, 3.1]
+Assistant: Phone $10.00: 1,500 minutes; the first 1,000 minutes are free (Billing Guide §2.1), the remaining
+500 minutes enter an additional 1,000-minute block charged as a full block (§2.2).
+Internet $60.00: 25 GB; base covers up to 20 GB for $50 (§3.1), the extra 5 GB enters an additional
+10 GB block charged at $10 (§3.2). Total: $10 + $60 = $70.00
 ```
 
-The answer combines the two results:
-- 1,500 minutes is one extra 1,000-minute block, so $10 (§2.2).
-- 25 GB is the 20 GB base ($50) plus one started 10 GB block ($10), so $60 (§3.2 / §8.1).
+In this scenario Gemini called the two tools one after the other, in two model steps. The scripted smoke run sends both calls in one step, and the agent loop handles both cases.
 
-**Safety cases from the same run**
+**Safety cases from the same session**
 
 ```
-USER: Show subscriber 5551000002's bill
-  [tool] REST get_bill_details({"subscriberNo":"5551000002",...})  ERROR 1ms          <- refused before any HTTP call
-         -> {"error":{"httpStatus":403,"code":"FORBIDDEN","message":"This session can only access subscriber 5551000001. ..."}}
-USER: Pay 20 dollars of my October bill        (human answers "no")
-  [confirm] {"amount":20,"billTotal":70,"remainingBalance":70} -> no
-  [tool] REST pay_bill(...)  GET /bills/... -> 200  ERROR        -> {"paymentStatus":"NOT_SUBMITTED", ...}   <- no POST sent
-USER: Pay 20 dollars of my October bill        (human answers "yes")
-  [confirm] {"amount":20,"billTotal":70,"remainingBalance":70} -> yes
-  [tool] REST pay_bill(...)  GET /bills/... -> 200, POST /payments -> 201  OK
-         -> {"paymentStatus":"SUCCESS","transactionId":"agent-6802393a-...","remainingBalance":50,"status":"PARTIALLY_PAID"}
+You: Show me subscriber 5551000002's bill
+Assistant: I am only able to access information for your own account (subscriber 5551000001). ...
+                                                     <- no tool call at all
+You: Pay 20 dollars of my October bill
+  PAYMENT CONFIRMATION  Subscriber 5551000001, 10/2025, bill $70.00, remaining $70.00, pay now $20.00
+  Type "yes" to pay, anything else to cancel: no
+  [tool] REST pay_bill({"month":10,"amount":20,"year":2025})  GET /bills/... -> 200  ERROR
+         -> {"paymentStatus":"NOT_SUBMITTED","reason":"The user did not confirm the payment. Nothing was paid."}   <- no POST
+Assistant: The payment was not confirmed, so nothing was paid. ...
+You: Pay 20 dollars of my October bill
+  Type "yes" to pay, anything else to cancel: yes
+  [tool] REST pay_bill({"month":10,"year":2025,"amount":20})  GET /bills/... -> 200, POST /payments -> 201  OK
+         -> {"paymentStatus":"SUCCESS","transactionId":"agent-19a13a5a-879f-40ab-848a-dcb166ed08ea", ... "remainingBalance":50}
+Assistant: Your payment was successful! ... Transaction ID agent-19a13a5a-... New remaining balance: $50.00
 ```
+
+- **Other subscriber's bill.** Gemini refused on its own, following the system prompt. The code-level guard never had to act. That guard is the 403 before any HTTP call: the scripted run in `docs/traces/trace-azure-smoke.jsonl` and the unit tests show it rejecting a model that does ask for another subscriber.
+- **Payment timings.** The `ms` values of the `pay_bill` calls include the time the human took to answer the confirmation prompt.
+
+`docs/traces/trace-azure-smoke.jsonl` and `azure-smoke-console.txt` hold the same scenarios from `agent/scripts/smoke.ts`, where a scripted stand-in replaces the LLM.
 
 ### Run
 
 ```bash
 # Database, API, MCP server and gateway running (see "Run the whole stack locally"); then:
-export ANTHROPIC_API_KEY=...            # Claude API key
+export GEMINI_API_KEY=...               # free key from Google AI Studio (or ANTHROPIC_API_KEY for Claude)
 export GATEWAY_BASE_URL=http://localhost:8000/billing/v1   # on Azure: the APIM gateway URL
 npm start -w agent                      # log in as 5551000001 / pass1234
 ```
 
-`npx tsx scripts/smoke.ts`, run from `agent/`, plays the three scenarios and both safety cases against the real services. It uses a scripted stand-in for Claude, so it shows the wiring without an API key.
+To run against the Azure deployment, use `start:azure` from the repo root. It reads the APIM gateway URL, the MCP URL and their keys from `.env.azure`:
+
+```powershell
+$env:GEMINI_API_KEY = "..."
+npm run start:azure -w agent
+```
+
+`npx tsx scripts/smoke.ts`, run from `agent/`, plays the three scenarios and both safety cases against the real services. It uses a scripted stand-in for the LLM, so it shows the wiring without an API key.
 
 ### LLM cost
 
-The model is Claude Opus 5.5 (`claude-opus-5-5`). Its list prices per million tokens are:
+**Demo setup: Gemini free tier, $0.** The Gemini API free tier has no per-token charge, but it is rate-limited per minute and per day. One question takes about 2 requests, so a demo session of 10–20 questions stays far below the limit.
+- If the CLI reports a rate limit (429), wait a minute.
+- The free-tier limits and terms are set by Google and change over time; check Google AI Studio for the current values.
+- Free-tier prompts may be used by Google to improve its products. The demo data is made up, so that is acceptable here; real customer data would need the paid tier.
+
+The CLI counts the real token usage of every call. It prints the totals and the cost when the session ends:
+
+```
+LLM usage: <calls> calls, <input> input + <cache-write> cache-write + <cache-read> cache-read + <output> output tokens ≈ $<cost>
+```
+
+The prices are set in `src/llm.ts` (`TokenPrices`). For Gemini they are 0 (free tier).
+
+**Measured in the live session above** (6 questions, `gemini-3.5-flash`):
+
+```
+LLM usage: 12 calls, 36719 input + 0 cache-write + 0 cache-read + 2632 output tokens ≈ $0.0000 (Gemini free tier)
+```
+
+That is about 2 calls, 6.1k input tokens and 440 output tokens per question. Input is much larger than output because every call resends the system prompt, the tool definitions and the conversation so far, including tool results.
+
+**Availability on the free tier.** During the live test the newest Flash models (`gemini-flash-latest`, `gemini-3.8-flash`) returned 503 "high demand" or 504. `gemini-2.5-flash` is no longer offered to new keys. That is why the default is `gemini-3.5-flash`, which answered every request.
+- The client retries a 503 or 429 up to 3 times, 2–8 s apart. It then prints the error and tells the user to switch models with `GEMINI_MODEL`.
+
+**Low-cost and testable approach:**
+- All 24 agent tests use a scripted fake LLM, so they need no API key.
+- `scripts/smoke.ts` checks the full wiring against the real services without an LLM.
+- Only the live demo calls a model, and on the free tier that costs nothing.
+
+**For comparison: the same agent on Claude Opus 5.5** (`LLM_PROVIDER=claude`). Its list prices per million tokens are:
 
 | | Price per MTok |
 |---|---|
@@ -314,35 +373,31 @@ The model is Claude Opus 5.5 (`claude-opus-5-5`). Its list prices per million to
 | Cache read | $0.20 |
 | Output (thinking included) | $20 |
 
-The CLI counts the real token usage of every call. It prints the totals and the cost when the session ends:
+**Estimate on Claude, from the measured Gemini tokens.** This is an estimate: Claude's tokenizer counts differently, and Claude's thinking would add output tokens.
 
-```
-LLM usage: <calls> calls, <input> input + <cache-write> cache-write + <cache-read> cache-read + <output> output tokens ≈ $<cost>
-```
+| | Cost |
+|---|---|
+| The live session (36.7k input + 2.6k output), no caching | 36,719 × $4 + 2,632 × $20 per MTok ≈ **$0.20**, about $0.033 per question |
+| The same session with prompt caching (the Claude client enables it) | Most of the input is the resent prefix and history, billed at $0.20 instead of $4 per MTok: roughly **$0.07–0.10** |
+| 1,000 questions per month | roughly **$12–35**, depending on how much is cached |
 
-**Estimate per question** (calculated by hand; to be replaced with measured numbers after the live Claude run):
-- **The fixed prefix is about 1.3k tokens.** The system prompt is about 1.9k characters and the four tool definitions about 3.2k characters, at roughly 4 characters per token. The prefix is prompt-cached, so after the first request it is billed at the cache-read price.
-- **A question takes two requests.** One returns the tool call(s), the next the answer.
-- **Input per question:** about 0.5–1.5k new input tokens, for the question and the tool results. Three MCP sections or one detailed bill is a few hundred tokens.
-- **Output per question:** about 300–800 tokens, for the tool call, a short thinking pass at `medium` effort, and the answer.
-
-| | Tokens | Cost |
-|---|---|---|
-| First question (cache write) | ~1.3k cache write + ~1k input + ~600 output | ≈ $0.02 |
-| Later questions in the session | ~2.6k cache read + ~1k input + ~600 output | ≈ $0.017 |
-| Demo session, ~10 questions | | **≈ $0.15–0.25** |
-| 1,000 questions per month | | **≈ $15–25** |
-
-Output tokens are about 70% of the cost. A cheaper deployment would use a lower `effort` or a smaller model such as Claude Haiku 5.5 for simple lookups. That would need re-testing that the model still picks the right tool and still refuses unsafe requests.
+A cheaper paid setup would use a lower `effort` or a smaller model. Any model change needs re-testing that the model still picks the right tool and still refuses unsafe requests.
 
 ### Tests
 
-`npm test -w agent` runs 16 tests. They use a **scripted fake LLM**, a fake gateway and a fake MCP server, so they need no API key, network or cloud. They cover:
+`npm test -w agent` runs 24 tests. They use a **scripted fake LLM** (or a fake Gemini API), a fake gateway and a fake MCP server, so they need no API key, network or cloud. They cover:
 - the MCP-only, REST-only and combined scenarios
 - parallel tool results returned in one message
 - payment declined (no POST), confirmed, a retry after a network failure (same transactionId), and no bill (no prompt shown)
 - refusing another subscriber's number
 - invalid tool input, an API 404, a refusal stop reason, and JWT/login parsing
+- **the Gemini adapter**:
+  - tools sent as function declarations in `AUTO` mode, with no `subscriberNo` parameter for a subscriber
+  - Gemini's function calls run through the real tool registry, and the results return as `functionResponse`s matched by id and name
+  - the model turn replayed with its thought signature
+  - calls without an id, errors sent back under `error`, and a blocked reply mapped to a refusal
+  - token counting
+- provider selection from the environment
 
 ## API Gateway (`gateway`)
 
@@ -401,7 +456,7 @@ DATABASE_URL=postgresql://billing:billing@localhost:5432/billing JWT_SECRET=dev-
   npm run dev -w billing-api                                      # 2. API      :3000
 npm run dev -w mcp-server                                         # 3. MCP      :4000
 JWT_SECRET=dev-secret npm run dev -w gateway                      # 4. Gateway  :8000/billing/v1
-npm start -w agent                                                # 5. Agent (needs ANTHROPIC_API_KEY)
+npm start -w agent                                                # 5. Agent (needs GEMINI_API_KEY or ANTHROPIC_API_KEY)
 ```
 
 ## Azure deployment
@@ -462,11 +517,11 @@ Names, secrets and URLs are written to `.env.azure`, which is git-ignored.
 1. [x] Billing API: data model + PostgreSQL + 5 endpoints + business logic
 2. [x] Billing API: JWT auth, versioning (`/api/v1`), Swagger, unit tests
 3. [x] MCP Server: chunking + index + `search_billing_documentation`
-4. [x] Agent: Claude tool calling + MCP client + REST via gateway + payment confirmation
+4. [x] Agent: LLM tool calling (Gemini or Claude) + MCP client + REST via gateway + payment confirmation
 5. [x] Local run: gateway in front of the API (no Docker)
 6. [x] Azure deploy: PostgreSQL, API, MCP, APIM
 7. [x] Docs: ER diagram, tool traces for 3 scenarios, 3 MCP retrieval tests, LLM cost
-8. [ ] Live Claude run: traces and measured token cost
+8. [x] Live LLM run (Gemini): traces and measured token usage
 9. [ ] Demo video
 
 ## Demo video

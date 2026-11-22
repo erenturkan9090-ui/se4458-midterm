@@ -59,7 +59,8 @@ export class GatewayClient {
       method,
       headers,
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
-      signal: AbortSignal.timeout(15_000),
+      // 45 s: an idle App Service F1 app can take 20-30 s to wake up on the first request.
+      signal: AbortSignal.timeout(45_000),
     });
     this.lastCall = { method, path, status: res.status, ms: Date.now() - started };
 

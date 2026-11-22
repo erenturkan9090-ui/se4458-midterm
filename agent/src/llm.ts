@@ -12,7 +12,20 @@ export interface LlmClient {
   create(req: LlmRequest): Promise<Anthropic.Beta.BetaMessage>;
 }
 
-/** Usage totals, used for the LLM cost estimate in the README. */
+/** USD per million tokens. */
+export interface TokenPrices {
+  input: number;
+  cacheWrite: number;
+  cacheRead: number;
+  output: number;
+}
+
+/** Claude Opus 5.5 list prices; cache write is the 5-minute TTL; thinking is billed as output. */
+export const CLAUDE_OPUS_5_5_PRICES: TokenPrices = { input: 4, cacheWrite: 5, cacheRead: 0.2, output: 20 };
+/** Gemini API free tier: no charge (rate-limited). */
+export const GEMINI_FREE_TIER_PRICES: TokenPrices = { input: 0, cacheWrite: 0, cacheRead: 0, output: 0 };
+
+/** Usage totals, used for the LLM cost figures in the README. */
 export class UsageMeter {
   inputTokens = 0;
   outputTokens = 0;
@@ -20,21 +33,23 @@ export class UsageMeter {
   cacheReadTokens = 0;
   calls = 0;
 
-  add(u: Anthropic.Beta.BetaUsage) {
+  constructor(readonly prices: TokenPrices = CLAUDE_OPUS_5_5_PRICES) {}
+
+  add(u: { input: number; output: number; cacheWrite?: number; cacheRead?: number }) {
     this.calls += 1;
-    this.inputTokens += u.input_tokens;
-    this.cacheWriteTokens += u.cache_creation_input_tokens ?? 0;
-    this.cacheReadTokens += u.cache_read_input_tokens ?? 0;
-    this.outputTokens += u.output_tokens;
+    this.inputTokens += u.input;
+    this.cacheWriteTokens += u.cacheWrite ?? 0;
+    this.cacheReadTokens += u.cacheRead ?? 0;
+    this.outputTokens += u.output;
   }
 
-  /**
-   * USD at Claude Opus 5.5 list prices per MTok: $4 input, $5 cache write (5-minute TTL),
-   * $0.20 cache read, $20 output (thinking tokens are billed as output).
-   */
   costUsd(): number {
+    const p = this.prices;
     return (
-      this.inputTokens * 4 + this.cacheWriteTokens * 5 + this.cacheReadTokens * 0.2 + this.outputTokens * 20
+      this.inputTokens * p.input +
+      this.cacheWriteTokens * p.cacheWrite +
+      this.cacheReadTokens * p.cacheRead +
+      this.outputTokens * p.output
     ) / 1_000_000;
   }
 }
@@ -67,7 +82,13 @@ export class AnthropicLlm implements LlmClient {
       // Caches the stable prefix (tools + system prompt) across the turns of a session.
       cache_control: { type: 'ephemeral' },
     });
-    this.usage.add(response.usage);
+    const u = response.usage;
+    this.usage.add({
+      input: u.input_tokens,
+      cacheWrite: u.cache_creation_input_tokens ?? 0,
+      cacheRead: u.cache_read_input_tokens ?? 0,
+      output: u.output_tokens,
+    });
     return response;
   }
 }

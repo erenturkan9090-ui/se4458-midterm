@@ -1,7 +1,7 @@
 /**
  * Terminal chat with the billing assistant.
  *   npm start -w agent
- * Env: ANTHROPIC_API_KEY, GATEWAY_BASE_URL, MCP_SERVER_URL (see .env.example).
+ * Env: GEMINI_API_KEY (or ANTHROPIC_API_KEY), GATEWAY_BASE_URL, MCP_SERVER_URL (see .env.example).
  * Optional AGENT_USERNAME / AGENT_PASSWORD skip the login prompt.
  */
 import readline from 'node:readline/promises';
@@ -9,8 +9,11 @@ import { stdin, stdout } from 'node:process';
 import { randomUUID } from 'node:crypto';
 import Anthropic from '@anthropic-ai/sdk';
 import { BillingAgent, systemPrompt } from './agent';
-import { loadConfig } from './config';
+import fs from 'node:fs';
+import path from 'node:path';
+import { applyAzureEnv, loadConfig } from './config';
 import { GatewayClient, GatewayError } from './gatewayClient';
+import { GeminiLlm, isGeminiApiError } from './gemini';
 import { AnthropicLlm } from './llm';
 import { McpToolClient } from './mcpClient';
 import { ToolRegistry, type PaymentRequest } from './tools';
@@ -21,11 +24,27 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const money = (n?: number) => (n === undefined ? '?' : `$${n.toFixed(2)}`);
 
 async function main() {
+  // --azure: use the deployed gateway (APIM) and MCP server from <repo>/.env.azure.
+  if (process.argv.includes('--azure')) {
+    const file = path.resolve(__dirname, '..', '..', '.env.azure');
+    if (!fs.existsSync(file)) throw new Error(`--azure needs ${file} (run infra/azure/deploy.ps1 first)`);
+    applyAzureEnv(file);
+  }
   const config = loadConfig();
+  const hasKey =
+    config.provider === 'gemini'
+      ? Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)
+      : Boolean(process.env.ANTHROPIC_API_KEY);
+  if (!hasKey) {
+    throw new Error(
+      'No LLM API key in this terminal. Set it first, e.g.  $env:GEMINI_API_KEY = "..."  (or ANTHROPIC_API_KEY for Claude)',
+    );
+  }
   const rl = readline.createInterface({ input: stdin, output: stdout });
 
   console.log(bold('AI Billing Support Assistant'));
-  console.log(dim(`gateway: ${config.gatewayBaseUrl}\nmcp:     ${config.mcpServerUrl}\nmodel:   ${config.model} (effort ${config.effort})\n`));
+  const modelInfo = config.provider === 'claude' ? `${config.model} (effort ${config.effort})` : `${config.model} (Gemini)`;
+  console.log(dim(`gateway: ${config.gatewayBaseUrl}\nmcp:     ${config.mcpServerUrl}\nmodel:   ${modelInfo}\n`));
 
   const gateway = new GatewayClient(config.gatewayBaseUrl, config.gatewaySubscriptionKey);
   const username = process.env.AGENT_USERNAME ?? (await rl.question('Username (subscriber no): ')).trim();
@@ -57,7 +76,7 @@ async function main() {
 
   const tools = new ToolRegistry(session, gateway, mcp, confirmPayment, trace);
   await tools.init();
-  const llm = new AnthropicLlm(config.model, config.effort);
+  const llm = config.provider === 'gemini' ? new GeminiLlm(config.model) : new AnthropicLlm(config.model, config.effort);
   const agent = new BillingAgent(llm, tools, systemPrompt(session, new Date()));
 
   console.log(dim('Ask about your bill, usage, payments or billing rules. Type "exit" to quit.\n'));
@@ -74,7 +93,21 @@ async function main() {
       const result = await agent.send(line);
       console.log(`${bold('Assistant:')} ${result.text}\n`);
     } catch (err) {
-      if (err instanceof Anthropic.AuthenticationError) {
+      if (isGeminiApiError(err)) {
+        if (err.status === 400 && /api key/i.test(err.message)) {
+          console.error('Gemini API rejected the key. Set GEMINI_API_KEY.');
+          break;
+        }
+        if (err.status === 401 || err.status === 403) {
+          console.error('Gemini API rejected the credentials. Set GEMINI_API_KEY.');
+          break;
+        }
+        if (err.status === 429) console.error('Gemini free-tier rate limit reached; wait a minute and try again.\n');
+        else if (err.status === 503) {
+          console.error('Gemini is overloaded right now (503). Ask again in a moment, or restart with another model, e.g. $env:GEMINI_MODEL = "gemini-3.5-flash-lite" (list them: npm run models -w agent).\n');
+        }
+        else console.error(`Gemini API error ${err.status}: ${err.message}\n`);
+      } else if (err instanceof Anthropic.AuthenticationError) {
         console.error('Claude API rejected the credentials. Set ANTHROPIC_API_KEY.');
         break;
       } else if (err instanceof Anthropic.RateLimitError) {
@@ -91,7 +124,7 @@ async function main() {
   console.log(
     dim(
       `\nLLM usage: ${u.calls} calls, ${u.inputTokens} input + ${u.cacheWriteTokens} cache-write + ${u.cacheReadTokens} cache-read + ${u.outputTokens} output tokens ` +
-        `≈ $${u.costUsd().toFixed(4)}. Trace: ${trace.file}`,
+        `≈ $${u.costUsd().toFixed(4)}${config.provider === 'gemini' ? ' (Gemini free tier)' : ''}. Trace: ${trace.file}`,
     ),
   );
   rl.close();
