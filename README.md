@@ -15,6 +15,69 @@ User ─► AI Agent ◄──► LLM (Gemini or Claude, function calling)
            └─► API Gateway (Azure APIM) ─► Billing REST API ─► PostgreSQL
 ```
 
+## For the instructor: try it
+
+Everything is deployed on Azure, so nothing needs to run locally to try the REST API through the gateway. The keys below are **demo keys for this course**. They protect only made-up demo data and will be revoked after grading.
+
+| | |
+|---|---|
+| Gateway base URL (Azure APIM) | `https://apim-se4458-7ysgwq.azure-api.net/billing/v1` |
+| Gateway subscription key (header `Ocp-Apim-Subscription-Key`) | `92964e0e54b04fb1b07bbc9cc075a85a` |
+| Swagger UI of the Billing API | https://api-se4458-7ysgwq.azurewebsites.net/docs |
+| MCP server (header `x-api-key`) | `https://mcp-se4458-7ysgwq.azurewebsites.net/mcp`, key `CGuNypmJrEvNKtEDq4A9nqAyvdFHk7NG` |
+| Demo users | `5551000001` / `pass1234`, `5551000002` / `pass1234` (subscribers); `admin` / `admin123` |
+
+The apps run on the free App Service tier and sleep when idle. The first request after a pause can take 20–30 s.
+
+**1. Gateway checks** (PowerShell):
+
+```powershell
+$gw = "https://apim-se4458-7ysgwq.azure-api.net/billing/v1"
+$k  = @{ "Ocp-Apim-Subscription-Key" = "92964e0e54b04fb1b07bbc9cc075a85a" }
+
+# Public route (Query Bill)
+Invoke-RestMethod "$gw/bills/5551000001?year=2025&month=10" -Headers $k
+
+# Protected route without a token -> 401 from the gateway
+Invoke-WebRequest "$gw/bills/5551000001/detailed?year=2025&month=10" -Headers $k -UseBasicParsing
+
+# Log in, then call the protected route with the JWT -> 200
+$t = (Invoke-RestMethod "$gw/auth/login" -Method Post -Headers $k -ContentType "application/json" -Body '{"username":"5551000001","password":"pass1234"}').accessToken
+Invoke-RestMethod "$gw/bills/5551000001/detailed?year=2025&month=10" -Headers ($k + @{ Authorization = "Bearer $t" })
+
+# Another subscriber's data with this token -> 403
+Invoke-WebRequest "$gw/bills/5551000002/detailed?year=2025&month=10" -Headers ($k + @{ Authorization = "Bearer $t" }) -UseBasicParsing
+```
+
+**2. The AI agent against Azure.** Needs Node.js 22 and a free Gemini API key from https://aistudio.google.com/apikey.
+
+```powershell
+git clone <this repository>; cd se4458-midterm; npm install
+$env:GEMINI_API_KEY = "<your Gemini key>"
+$env:GATEWAY_BASE_URL = "https://apim-se4458-7ysgwq.azure-api.net/billing/v1"
+$env:GATEWAY_SUBSCRIPTION_KEY = "92964e0e54b04fb1b07bbc9cc075a85a"
+$env:MCP_SERVER_URL = "https://mcp-se4458-7ysgwq.azurewebsites.net/mcp"
+$env:MCP_API_KEY = "CGuNypmJrEvNKtEDq4A9nqAyvdFHk7NG"
+npm start -w agent          # log in as 5551000001 / pass1234
+```
+
+Then ask:
+1. `What does extra internet cost?` (MCP only)
+2. `How much is my October 2025 bill?` (REST only)
+3. `Why is my October 2025 bill 70 dollars?` (REST and MCP)
+4. `Pay 20 dollars of my October bill` (asks for confirmation; type `yes`)
+
+The expected output is in `docs/traces/gemini-live-console.txt`.
+
+**3. Unit tests** run with no cloud, database or LLM:
+
+```bash
+npm install
+npm test        # all workspaces: billing-api 53, mcp-server 28, agent 24, gateway 12
+```
+
+**Demo data.** Subscriber 5551000001 has an October 2025 bill of $70: 1,500 minutes and 25,000 MB. Subscriber 5551000002 has a bill of $110. Payments made while trying the system change the remaining balance. The owner can restore the starting state with `infra\azure\deploy.ps1 -Location swedencentral -Steps reset`.
+
 ## Repository layout
 
 | Path | Contents |

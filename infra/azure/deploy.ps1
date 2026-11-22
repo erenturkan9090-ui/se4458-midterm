@@ -308,6 +308,13 @@ if ($StepList -contains "apim") {
   Invoke-ArmPut "/subscriptions/billing-agent" @{ properties = @{ displayName = "Billing agent"; scope = "$ApimId/apis/billing-v1"; state = "active" } }
   $secrets = Invoke-Arm "POST" "/subscriptions/billing-agent/listSecrets" $null
   $State["GATEWAY_SUBSCRIPTION_KEY"] = $secrets.primaryKey
+
+  # A separate key for reviewers (published in the README), so it can be revoked or
+  # regenerated without touching the agent's own key.
+  Write-Step "Subscription key for reviewers"
+  Invoke-ArmPut "/subscriptions/reviewer-demo" @{ properties = @{ displayName = "Reviewer demo"; scope = "$ApimId/apis/billing-v1"; state = "active" } }
+  $reviewer = Invoke-Arm "POST" "/subscriptions/reviewer-demo/listSecrets" $null
+  $State["REVIEWER_SUBSCRIPTION_KEY"] = $reviewer.primaryKey
 }
 
 $State["GATEWAY_BASE_URL"] = "https://$Apim.azure-api.net/billing/v1"
